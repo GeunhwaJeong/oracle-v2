@@ -121,3 +121,15 @@ a funded throwaway relayer, and checks the feeds on chain, the endpoints, a rela
 party, the step limit (a signed price 30% away refused, forced by the package admin, the pinned
 feed refusing 1.01), and that a service whose signer is not registered changes nothing
 (32 checks).
+
+`scripts/localnet_market_check.py` goes on to the engine: it creates a BTC/USD market on feeds
+the running service keeps fresh (one-minute feed TWAP) and checks that a maker and a taker trade
+with no price update in their own transactions, that a trade can carry the updates served on
+`/v1/updates`, that a position opened at exactly the initial margin is liquidated at the live
+mark price once the real market has moved against it (the maintenance margin is set a hair
+below the initial one, and one position is opened in each direction), that funding is cranked on
+the live index, that every session aborts with `EBadIndexPrice` once the stopped service's feed
+is older than the market's tolerance, that with the service signing but not relaying only the
+sessions that carry the updates go through, and that the market reopens when the relayer is
+back (23 checks; the wait for the liquidation depends on the market, about a minute in the runs
+so far).
