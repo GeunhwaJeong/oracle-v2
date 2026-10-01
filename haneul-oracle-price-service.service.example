@@ -1,0 +1,21 @@
+# /etc/systemd/system/haneul-oracle-price-service.service
+[Unit]
+Description=Haneul oracle price service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=haneul-oracle
+WorkingDirectory=/opt/oracle-v2
+# ORACLE_CONFIG, ORACLE_SIGNER_SEED and RELAYER_KEY; owned by root, mode 600.
+EnvironmentFile=/etc/haneul-oracle/price-service.env
+ExecStart=/usr/bin/node src/main.ts
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

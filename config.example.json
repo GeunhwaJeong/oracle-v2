@@ -1,0 +1,80 @@
+{
+  "rpcUrl": "http://127.0.0.1:9000",
+  "network": "localnet",
+  "packageId": "0x0",
+  "sourceId": "0x0",
+  "aggregatorConfigId": "0x0",
+  "intervalMs": 3000,
+  "fetchTimeoutMs": 2000,
+  "httpPort": 8787,
+  "batchExchanges": ["kraken"],
+  "quoteRates": {
+    "USDT": {
+      "minSources": 2,
+      "sources": [
+        { "exchange": "kraken", "market": "USDT/USD" },
+        { "exchange": "coinbaseexchange", "market": "USDT/USD" },
+        { "exchange": "bitstamp", "market": "USDT/USD" }
+      ]
+    }
+  },
+  "feeds": [
+    {
+      "symbol": "BTC/USD",
+      "storageId": 0,
+      "priceFeedStorageId": "0x0",
+      "minSources": 4,
+      "sources": [
+        { "exchange": "binance", "market": "BTC/USDT", "weight": 3 },
+        { "exchange": "okx", "market": "BTC/USDT", "weight": 2 },
+        { "exchange": "bybit", "market": "BTC/USDT", "weight": 2 },
+        { "exchange": "coinbaseexchange", "market": "BTC/USD", "weight": 2 },
+        { "exchange": "kraken", "market": "BTC/USD" },
+        { "exchange": "kucoin", "market": "BTC/USDT" },
+        { "exchange": "gate", "market": "BTC/USDT" },
+        { "exchange": "mexc", "market": "BTC/USDT" },
+        { "exchange": "bitstamp", "market": "BTC/USD" }
+      ]
+    },
+    {
+      "symbol": "ETH/USD",
+      "storageId": 1,
+      "priceFeedStorageId": "0x0",
+      "minSources": 4,
+      "sources": [
+        { "exchange": "binance", "market": "ETH/USDT", "weight": 3 },
+        { "exchange": "okx", "market": "ETH/USDT", "weight": 2 },
+        { "exchange": "bybit", "market": "ETH/USDT", "weight": 2 },
+        { "exchange": "coinbaseexchange", "market": "ETH/USD", "weight": 2 },
+        { "exchange": "kraken", "market": "ETH/USD" },
+        { "exchange": "kucoin", "market": "ETH/USDT" },
+        { "exchange": "gate", "market": "ETH/USDT" },
+        { "exchange": "mexc", "market": "ETH/USDT" },
+        { "exchange": "bitstamp", "market": "ETH/USD" }
+      ]
+    },
+    {
+      "symbol": "SOL/USD",
+      "storageId": 2,
+      "priceFeedStorageId": "0x0",
+      "minSources": 4,
+      "sources": [
+        { "exchange": "binance", "market": "SOL/USDT", "weight": 3 },
+        { "exchange": "okx", "market": "SOL/USDT", "weight": 2 },
+        { "exchange": "bybit", "market": "SOL/USDT", "weight": 2 },
+        { "exchange": "coinbaseexchange", "market": "SOL/USD", "weight": 2 },
+        { "exchange": "kraken", "market": "SOL/USD" },
+        { "exchange": "kucoin", "market": "SOL/USDT" },
+        { "exchange": "gate", "market": "SOL/USDT" },
+        { "exchange": "mexc", "market": "SOL/USDT" },
+        { "exchange": "bitstamp", "market": "SOL/USD" }
+      ]
+    },
+    {
+      "symbol": "RYUSD/USD",
+      "storageId": 3,
+      "priceFeedStorageId": "0x0",
+      "fixedPrice": "1"
+    }
+  ]
+}

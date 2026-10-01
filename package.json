@@ -1,0 +1,26 @@
+{
+  "name": "haneul-oracle-v2",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Collects exchange prices, aggregates them, signs price updates for the oracle_haneul source and relays them to Haneul",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "start": "node src/main.ts",
+    "once": "node src/main.ts --once",
+    "quote": "node src/main.ts --dry-run --once",
+    "test": "node --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@haneullabs/haneul": "2.33.1",
+    "ccxt": "4.5.84"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "typescript": "^5.9.0"
+  }
+}
