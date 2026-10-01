@@ -46,7 +46,15 @@ Every `intervalMs` (3 s by default):
    follows a real move over a few rounds but cannot be thrown by one bad round. The limit lapses
    after `stepLimitResetMs` without a signed price.
 6. **Sign** with a timestamp that only goes up, and **relay** all feeds in one transaction.
-   A failed relay is logged; the next round signs fresh prices.
+   If the chain refuses that transaction (one feed beyond its step limit fails all of it), each
+   feed is relayed on its own, so the others do not go stale with it. A failed relay is logged;
+   the next round signs fresh prices.
+
+The source enforces a step limit of its own on chain (by default 0.5% at once plus 0.5% per
+second since the stored price, 20% at most, and whatever is set per feed). The service's
+`maxStepBps` of 1% per three-second round stays inside it, and because the chain's allowance
+grows with time a few missed relays do not lock a feed out. A gap beyond the chain's maximum
+needs the package admin (`force_update_price_feed`) with an update from `/v1/updates`.
 
 A feed with a `fixedPrice` (a collateral that is worth its quote by construction) is signed at
 that price every round, so that it stays within the markets' staleness tolerance.
@@ -69,7 +77,9 @@ npm start
 bounds the source and the markets enforce. Its public key (logged at startup) is registered on
 the source with `oracle_haneul::source::set_signer`, with an expiry. `RELAYER_KEY` only pays for
 transactions and should be a separate wallet with a small balance. Without `RELAYER_KEY` the
-service signs and serves updates and relays nothing.
+service signs and serves updates and relays nothing. That is also how feeds are created: a feed
+is created from a signed price (`new_price_feed`, with the vendor cap), so run the service
+without a relayer, take the updates from `/v1/updates`, and create each feed at its market price.
 
 `haneul-oracle-price-service.service.example` is a systemd unit for running it under a
 dedicated user.
@@ -97,7 +107,7 @@ below the markets' oracle tolerance (10 s for the base asset by default). Venues
 ## Tests
 
 ```bash
-npm test             # 47 unit tests: fixed point, aggregation, message and signature, round, service loop
+npm test             # 48 unit tests: fixed point, aggregation, message and signature, round, service loop
 npm run typecheck
 ```
 
@@ -105,6 +115,9 @@ The message tests sign the same updates as the `oracle_haneul` Move unit tests a
 same signatures, which the chain's Ed25519 verification accepts.
 
 `scripts/localnet_check.py` runs the service against a localnet with live exchange prices: it
-publishes the perp engine's packages, sets up the source, a signer and four feeds, runs the
-service with a funded throwaway relayer, and checks the feeds on chain, the endpoints, a relay by
-a third party, and that a service whose signer is not registered changes nothing (25 checks).
+publishes the perp engine's packages, sets up the source and a signer, creates four feeds from
+the prices the service signs without a relayer, pins the collateral feed, runs the service with
+a funded throwaway relayer, and checks the feeds on chain, the endpoints, a relay by a third
+party, the step limit (a signed price 30% away refused, forced by the package admin, the pinned
+feed refusing 1.01), and that a service whose signer is not registered changes nothing
+(32 checks).

@@ -17,7 +17,7 @@ import { PriceService } from "../src/service.ts";
 
 const SOURCE = "0x9ae707b98dfe186ddf62cbdaf35e030c4bcb1f74985af871b581098030e2cf82";
 
-function setup(options: { stored?: StoredPrice | null; relayFails?: boolean } = {}) {
+function setup(options: { stored?: StoredPrice | null; relayFails?: boolean; refused?: string } = {}) {
   const config = parseConfig({
     rpcUrl: "http://127.0.0.1:9000",
     packageId: "0x1",
@@ -62,6 +62,7 @@ function setup(options: { stored?: StoredPrice | null; relayFails?: boolean } = 
     relayerBalance: async () => 100,
     relay: async (updates: SignedUpdate[]) => {
       if (options.relayFails) throw new Error("node unreachable");
+      if (updates.some((update) => update.symbol === options.refused)) throw new Error("EStepTooLarge");
       relayed.push(updates);
       return { digest: "digest", gasUsed: 1n };
     },
@@ -166,8 +167,17 @@ test("a failed relay is logged and the signed updates stay available", async () 
   const { service, logs } = setup({ relayFails: true });
   const signed = await service.round();
   assert.equal(signed.length, 2);
-  assert.ok(logs.some((line) => /error relay failed: node unreachable/.test(line)));
+  assert.ok(logs.some((line) => /error relay failed for .*: node unreachable/.test(line)));
   assert.equal(service.latestUpdates().length, 2);
+});
+
+test("a feed the chain refuses does not hold the other feeds back", async () => {
+  const { service, relayed, logs } = setup({ refused: "BTC/USD" });
+  await service.round();
+  // The joint transaction fails, then each feed goes out on its own: only the other one lands.
+  assert.deepEqual(relayed.map((updates) => updates.map((u) => u.symbol)), [["RYUSD/USD"]]);
+  assert.equal(logs.filter((line) => /error relay failed for .*BTC\/USD.*EStepTooLarge/.test(line)).length, 2);
+  assert.ok(logs.some((line) => /info relayed RYUSD\/USD=1 /.test(line)));
 });
 
 test("status reports the age of each feed's last signed update", async () => {

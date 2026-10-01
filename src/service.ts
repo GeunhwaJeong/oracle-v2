@@ -130,19 +130,29 @@ export class PriceService {
     }
 
     if (signed.length > 0 && chain !== null) {
-      try {
-        const { digest, gasUsed } = await chain.relay(signed);
-        log.info(
-          `relayed ${signed.map((u) => `${u.symbol}=${formatFixed(u.price)}`).join(" ")} ` +
-            `in ${digest} (gas ${gasUsed})`,
-        );
-      } catch (error) {
-        // The signed updates stay available over HTTP; the next round signs fresh ones.
-        log.error(`relay failed: ${error instanceof Error ? error.message : String(error)}`);
+      if (!(await this.#relay(chain, signed)) && signed.length > 1) {
+        // One update the chain refuses (a feed beyond its step limit, say) fails the whole
+        // transaction. The other feeds must not go stale with it, so each goes out on its own.
+        for (const update of signed) await this.#relay(chain, [update]);
       }
       await this.#checkBalance();
     }
     return signed;
+  }
+
+  /** Relays the updates in one transaction; a failure is logged, not thrown. */
+  async #relay(chain: Chain, updates: SignedUpdate[]): Promise<boolean> {
+    const { log } = this.#deps;
+    const what = updates.map((u) => `${u.symbol}=${formatFixed(u.price)}`).join(" ");
+    try {
+      const { digest, gasUsed } = await chain.relay(updates);
+      log.info(`relayed ${what} in ${digest} (gas ${gasUsed})`);
+      return true;
+    } catch (error) {
+      // The signed updates stay available over HTTP; the next round signs fresh ones.
+      log.error(`relay failed for ${what}: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
   }
 
   #skip(feed: FeedConfig, reason: string): void {

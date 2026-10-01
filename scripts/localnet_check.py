@@ -3,11 +3,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """Runs the price service against a localnet and checks what lands on chain.
 
-Publishes the perp engine's packages with the helpers of its localnet suite, sets up the
-`oracle_haneul` source with a throwaway signer and four feeds (BTC, ETH, SOL and a fixed-price
-RYUSD), starts the service with live exchange prices and a freshly funded throwaway relayer, and
-then checks the feeds, the HTTP endpoint, a third-party relay of a served update, and what a
-service whose signer is not registered achieves.
+Publishes the perp engine's packages with the helpers of its localnet suite and sets up the
+`oracle_haneul` source with a throwaway signer and four storages (BTC, ETH, SOL and a fixed-price
+RYUSD). The feeds are created the way a deployment would create them: the service runs without
+a relayer, only signing, and the signed prices it serves go into `new_price_feed`. The service
+is then run with live exchange prices and a freshly funded throwaway relayer, and the script
+checks the feeds, the HTTP endpoint, a third-party relay of a served update, the step limit
+(a signed price 30% away is refused, the package admin can force it, the pinned collateral
+feed takes no other price), and what a service whose signer is not registered achieves.
 
 Start the network first (see the perp engine's e2e/localnet_e2e.py), then:
     python3 scripts/localnet_check.py [path to the perp-dex checkout, default ~/perp-dex]
@@ -39,9 +42,6 @@ UNREGISTERED_SEED = bytes([0x55] * 32)
 HTTP_PORT = 18787
 INTERVAL_MS = 3000
 SYMBOLS = ["BTC/USD", "ETH/USD", "SOL/USD", "RYUSD/USD"]
-# Placeholder prices the feeds are created with, stamped an hour ago so that the service's step
-# limit has lapsed by the time it signs its first real price.
-PLACEHOLDER = {"BTC/USD": 1, "ETH/USD": 1, "SOL/USD": 1, "RYUSD/USD": 1}
 
 
 def grpc(method, request):
@@ -94,7 +94,10 @@ def new_relayer():
 
 
 def start_service(config_path, seed, relayer_key, log_path):
-    env = dict(os.environ, ORACLE_SIGNER_SEED=seed.hex(), RELAYER_KEY=relayer_key, NODE_NO_WARNINGS="1")
+    env = dict(os.environ, ORACLE_SIGNER_SEED=seed.hex(), NODE_NO_WARNINGS="1")
+    env.pop("RELAYER_KEY", None)
+    if relayer_key is not None:
+        env["RELAYER_KEY"] = relayer_key
     return subprocess.Popen(
         ["node", "src/main.ts", "--config", str(config_path)],
         cwd=SERVICE,
@@ -156,39 +159,6 @@ def main():
     storages = {s["symbol"]: s for s in events(j, "::events::CreatedPriceFeedStorage")}
     check("four storages created", set(storages) == set(SYMBOLS))
 
-    created_ms = int(time.time() * 1000) - 3_600_000
-    cmds = []
-    for i, symbol in enumerate(SYMBOLS):
-        s = storages[symbol]
-        price = PLACEHOLDER[symbol] * ONE
-        signature = oracle_signing.sign_price_update(SIGNER_SEED, source, int(s["storage_id"]), price, 0, created_ms + i)
-        cmds += call(
-            f"{SIGNED}::price_feed_storage::new_price_feed",
-            [VK, ADMIN],
-            obj(source),
-            obj(oracle_vk),
-            obj(oracle_config),
-            obj(s["price_feed_storage_obj_id"]),
-            u128(price),
-            u128(0),
-            u64(created_ms + i),
-            vec_u8(SIGNER),
-            vec_u8(signature),
-            u64(60_000),
-            CLOCK,
-        )
-    j = ptb("feeds from signed placeholder prices", cmds)
-    check("four feeds created", len(events(j, "::events::CreatedPriceFeed")) == 4)
-
-    section("Relayer")
-    relayer_key, relayer = new_relayer()
-    out = cli("client", "faucet", "--address", relayer)
-    deadline = time.time() + 90
-    while balance(relayer) == 0 and time.time() < deadline:
-        time.sleep(1)
-    funded = balance(relayer)
-    check("the throwaway relayer is funded by the faucet", funded > 0, f"{funded / 1e9:.2f} HANEUL; {out.stderr[-200:].strip()}" if funded == 0 else f"{funded / 1e9:.2f} HANEUL")
-
     venues = [("binance", "USDT", 3), ("okx", "USDT", 2), ("bybit", "USDT", 2), ("coinbaseexchange", "USD", 2), ("kraken", "USD", 1), ("kucoin", "USDT", 1), ("gate", "USDT", 1), ("mexc", "USDT", 1), ("bitstamp", "USD", 1)]
     feeds = []
     for symbol in SYMBOLS:
@@ -217,7 +187,62 @@ def main():
     config_path = workdir / "config.json"
     config_path.write_text(json.dumps(config, indent=2))
     log_path = workdir / "service.log"
-    print(f"  config and log in {workdir}")
+    print(f"  config and logs in {workdir}")
+
+    # A feed is created from a signed price like any update. With the default step limit a
+    # placeholder would lock the feed out of the market price, so the first prices come from the
+    # service itself, run without a relayer: it signs and serves, and relays nothing.
+    signing_only = start_service(config_path, SIGNER_SEED, None, workdir / "signing-only.log")
+    try:
+        served = {}
+        deadline = time.time() + 60
+        while len(served) < len(SYMBOLS) and time.time() < deadline:
+            time.sleep(1)
+            try:
+                served = {u["symbol"]: u for u in http("/v1/updates")[1]["updates"]}
+            except OSError:
+                pass
+        check("without a relayer the service signs and serves every feed", set(served) == set(SYMBOLS))
+        cmds = []
+        for symbol in SYMBOLS:
+            u = served[symbol]
+            cmds += call(
+                f"{SIGNED}::price_feed_storage::new_price_feed",
+                [VK, ADMIN],
+                obj(source),
+                obj(oracle_vk),
+                obj(oracle_config),
+                obj(u["priceFeedStorageId"]),
+                u128(int(u["price"])),
+                u128(int(u["confidence"])),
+                u64(int(u["timestampMs"])),
+                vec_u8(bytes.fromhex(u["publicKey"])),
+                vec_u8(bytes.fromhex(u["signature"])),
+                u64(60_000),
+                CLOCK,
+            )
+        j = ptb("feeds from the prices the service signed", cmds)
+        check("four feeds created", len(events(j, "::events::CreatedPriceFeed")) == 4)
+    finally:
+        stop_service(signing_only)
+    check("it relayed nothing", " relayed " not in (workdir / "signing-only.log").read_text())
+
+    # The collateral is worth its quote by construction: its feed takes no other price.
+    ryusd_storage = int(storages["RYUSD/USD"]["storage_id"])
+    j = ptb(
+        "pin the collateral feed",
+        call(f"{SIGNED}::source::set_step_limit", [ADMIN], obj(source), obj(oracle_config), obj(oracle_pkg_admin), f"{ryusd_storage}u32", u64(0), u64(0), u64(0)),
+    )
+    check("the collateral feed is pinned", len(events(j, "::events::SetStepLimit")) == 1)
+
+    section("Relayer")
+    relayer_key, relayer = new_relayer()
+    out = cli("client", "faucet", "--address", relayer)
+    deadline = time.time() + 90
+    while balance(relayer) == 0 and time.time() < deadline:
+        time.sleep(1)
+    funded = balance(relayer)
+    check("the throwaway relayer is funded by the faucet", funded > 0, f"{funded / 1e9:.2f} HANEUL; {out.stderr[-200:].strip()}" if funded == 0 else f"{funded / 1e9:.2f} HANEUL")
 
     section("Service with live prices")
     service = start_service(config_path, SIGNER_SEED, relayer_key, log_path)
@@ -237,7 +262,7 @@ def main():
             if symbol == "RYUSD/USD":
                 check("RYUSD/USD: the fixed price is exactly one", price == ONE)
             else:
-                check(f"{symbol}: the placeholder was replaced by a market price", price > 2 * ONE, f"{price / ONE:,.2f}")
+                check(f"{symbol}: the feed holds a market price", price > 2 * ONE, f"{price / ONE:,.2f}")
                 drift = abs(price - int(served[symbol]["price"])) * 10_000 // price
                 check(f"{symbol}: on chain within 1% of the latest served update", drift <= 100, f"{drift} bps")
         status, health = http("/healthz")
@@ -274,6 +299,36 @@ def main():
     ptb("relay by the active address", call(f"{SIGNED}::price_feed_storage::update_price_feed", [], *update))
     price, timestamp_ms = feed(btc_pfs, source_id)
     check("the update relayed by a third party is on chain", price == fresh_price and timestamp_ms == fresh_ms and timestamp_ms > before_ms)
+
+    section("Step limit")
+    # A price the registered signer signed, 30% above the stored one: the default limit allows
+    # 20% at most, however long the feed has been quiet.
+    stored_price, _ = feed(btc_pfs, source_id)
+    far_ms = int(time.time() * 1000)
+    far_price = stored_price * 13 // 10
+    signature = oracle_signing.sign_price_update(SIGNER_SEED, source, int(storages["BTC/USD"]["storage_id"]), far_price, 0, far_ms)
+    far = [obj(btc_pfs), u128(far_price), u128(0), u64(far_ms), vec_u8(SIGNER), vec_u8(signature), CLOCK]
+    ptb(
+        "a signed BTC price 30% away",
+        call(f"{SIGNED}::price_feed_storage::update_price_feed", [], obj(source), obj(oracle_config), *far),
+        expect_abort=("price_feed_storage", 6),
+    )
+    check("the refused price is not on chain", feed(btc_pfs, source_id)[0] == stored_price)
+    ptb(
+        "the package admin forces it",
+        call(f"{SIGNED}::price_feed_storage::force_update_price_feed", [ADMIN], obj(source), obj(oracle_config), obj(oracle_pkg_admin), *far),
+    )
+    check("the forced price is on chain", feed(btc_pfs, source_id) == (far_price, far_ms))
+    # The pinned collateral feed refuses a signed price of 1.01.
+    ryusd_pfs = storages["RYUSD/USD"]["price_feed_storage_obj_id"]
+    off_ms = int(time.time() * 1000)
+    off_price = ONE + ONE // 100
+    signature = oracle_signing.sign_price_update(SIGNER_SEED, source, ryusd_storage, off_price, 0, off_ms)
+    ptb(
+        "a signed collateral price of 1.01",
+        call(f"{SIGNED}::price_feed_storage::update_price_feed", [], obj(source), obj(oracle_config), obj(ryusd_pfs), u128(off_price), u128(0), u64(off_ms), vec_u8(SIGNER), vec_u8(signature), CLOCK),
+        expect_abort=("price_feed_storage", 6),
+    )
 
     section("A service whose signer is not registered")
     held = {symbol: feed(storages[symbol]["price_feed_storage_obj_id"], source_id) for symbol in SYMBOLS}
