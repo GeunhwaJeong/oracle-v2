@@ -12,6 +12,8 @@ import type { Chain, SignedUpdate, StoredPrice } from "../src/chain.ts";
 import { parseConfig } from "../src/config.ts";
 import { ONE, parseFixed } from "../src/fixed.ts";
 import { PriceSigner, priceUpdateMessage } from "../src/message.ts";
+import { Metrics } from "../src/metrics.ts";
+import { isHealthy } from "../src/server.ts";
 import type { Fetched } from "../src/round.ts";
 import { PriceService } from "../src/service.ts";
 
@@ -68,7 +70,9 @@ function setup(options: { stored?: StoredPrice | null; relayFails?: boolean; ref
     },
   } as unknown as Chain;
   const signer = PriceSigner.fromHex("11".repeat(32));
+  const metrics = new Metrics();
   const service = new PriceService({
+    metrics,
     config,
     sources,
     signer,
@@ -76,7 +80,7 @@ function setup(options: { stored?: StoredPrice | null; relayFails?: boolean; ref
     log: { info: (m) => logs.push(`info ${m}`), warn: (m) => logs.push(`warn ${m}`), error: (m) => logs.push(`error ${m}`) },
     now: () => state.now,
   });
-  return { config, state, relayed, logs, service, signer };
+  return { config, state, relayed, logs, service, signer, metrics };
 }
 
 function verifies(update: SignedUpdate): boolean {
@@ -189,4 +193,92 @@ test("status reports the age of each feed's last signed update", async () => {
   assert.equal(btc!.lastPrice, "100000");
   assert.equal(btc!.venuesUsed, 3);
   assert.equal(ryusd!.ageMs, 3_999);
+});
+
+test("a service that signs but cannot reach the chain is not healthy", async () => {
+  const { service, state, config } = setup({ relayFails: true });
+  await service.round();
+  state.now += 1_000;
+  const feeds = service.status();
+  // Signed a second ago, never landed.
+  assert.deepEqual(feeds.map((feed) => [feed.ageMs !== null, feed.relayedAgeMs]), [[true, null], [true, null]]);
+  assert.equal(isHealthy(feeds, config.intervalMs), false);
+});
+
+test("a relaying service is healthy while its updates keep landing", async () => {
+  const { service, state, config } = setup();
+  assert.equal(isHealthy(service.status(), config.intervalMs), false, "nothing signed yet");
+  await service.round();
+  state.now += 3_000;
+  assert.deepEqual(service.status().map((feed) => feed.relayedAgeMs), [3_000, 3_000]);
+  assert.equal(isHealthy(service.status(), config.intervalMs), true);
+  state.now += 7_000;
+  assert.equal(isHealthy(service.status(), config.intervalMs), false, "three rounds without an update");
+});
+
+test("a feed the chain refuses is unhealthy while the others are not held to it", async () => {
+  const { service, state } = setup({ refused: "BTC/USD" });
+  await service.round();
+  state.now += 1_000;
+  const [btc, ryusd] = service.status();
+  assert.equal(btc!.relayedAgeMs, null);
+  assert.equal(ryusd!.relayedAgeMs, 1_000);
+});
+
+test("a service that only signs is judged on what it signs", async () => {
+  const { config, state, signer } = setup();
+  const sources = {
+    fetchAll: async () =>
+      new Map<string, Fetched>(
+        ["a", "b", "c"].map((venue) => [
+          `${venue}:BTC/USD`,
+          { ticker: { bid: parseFixed("99999"), ask: parseFixed("100001"), exchangeTimestampMs: null } },
+        ]),
+      ),
+  };
+  const log = { info: () => {}, warn: () => {}, error: () => {} };
+  const service = new PriceService({ config, sources, signer, chain: null, log, now: () => state.now });
+  await service.round();
+  assert.equal(service.status()[0]!.relayedAgeMs, undefined);
+  assert.equal(isHealthy(service.status(), config.intervalMs), true);
+});
+
+test("a round is counted with what became of every venue", async () => {
+  const { service, state, metrics } = setup();
+  state.down.add("c");
+  await service.round();
+  const btc = { feed: "BTC/USD" };
+  assert.equal(metrics.rounds.get(), 1);
+  assert.equal(metrics.sourcesUsed.get(btc), 2);
+  assert.equal(metrics.sourceOutcomes.get({ ...btc, source: "a:BTC/USD", outcome: "used" }), 1);
+  assert.equal(metrics.sourceOutcomes.get({ ...btc, source: "c:BTC/USD", outcome: "error" }), 1);
+  assert.equal(metrics.sourceMid.get({ ...btc, source: "a:BTC/USD" }), 100_000);
+  assert.equal(metrics.signed.get(btc), 1);
+  assert.equal(metrics.price.get(btc), 100_000);
+  // A spread of 2 on 100,000 is a confidence of 1: a tenth of a basis point.
+  assert.equal(metrics.confidenceBps.get(btc), 0.1);
+  assert.equal(metrics.lastSigned.get(btc), state.now / 1000);
+  assert.equal(metrics.lastRelayed.get(btc), state.now / 1000);
+  assert.equal(metrics.relays.get({ result: "ok" }), 1);
+  assert.equal(metrics.relayGas.get(), 1);
+  assert.equal(metrics.roundSeconds.count, 1);
+
+  state.down.add("b");
+  await service.round();
+  assert.equal(metrics.skipped.get({ ...btc, reason: "sources" }), 1);
+  assert.equal(metrics.sourcesUsed.get(btc), 0);
+  assert.equal(metrics.signed.get(btc), 1);
+});
+
+test("a failed relay and a clamped price are counted", async () => {
+  const { service, metrics, state } = setup({ relayFails: true });
+  await service.round();
+  // The joint relay, then one attempt per feed.
+  assert.equal(metrics.relays.get({ result: "failed" }), 3);
+  assert.equal(metrics.lastRelayed.get({ feed: "BTC/USD" }), 0);
+  state.mid = 105_000;
+  state.now += 3_000;
+  await service.round();
+  assert.equal(metrics.clamped.get({ feed: "BTC/USD" }), 1);
+  assert.equal(metrics.price.get({ feed: "BTC/USD" }), 101_000);
 });

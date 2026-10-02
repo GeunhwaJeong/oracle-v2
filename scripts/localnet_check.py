@@ -26,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -42,6 +43,8 @@ UNREGISTERED_SEED = bytes([0x55] * 32)
 HTTP_PORT = 18787
 INTERVAL_MS = 3000
 SYMBOLS = ["BTC/USD", "ETH/USD", "SOL/USD", "RYUSD/USD"]
+# Followed over WebSockets; the rest are asked over REST every round.
+STREAMED = ["binance", "okx", "bybit", "coinbaseexchange", "kraken", "kucoin", "gate", "bitstamp"]
 
 
 def grpc(method, request):
@@ -76,8 +79,18 @@ def feed(pfs, source_id):
 
 
 def http(path):
-    with urllib.request.urlopen(f"http://127.0.0.1:{HTTP_PORT}{path}", timeout=5) as response:
-        return response.status, json.loads(response.read())
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{HTTP_PORT}{path}", timeout=5) as response:
+            return response.status, json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        return error.code, json.loads(error.read())
+
+
+def metrics():
+    """The service's metrics as {'name{labels}': value}."""
+    with urllib.request.urlopen(f"http://127.0.0.1:{HTTP_PORT}/metrics", timeout=5) as response:
+        lines = response.read().decode().splitlines()
+    return {line.rsplit(" ", 1)[0]: float(line.rsplit(" ", 1)[1]) for line in lines if line and not line.startswith("#")}
 
 
 def new_relayer():
@@ -180,6 +193,7 @@ def main():
         "intervalMs": INTERVAL_MS,
         "httpPort": HTTP_PORT,
         "batchExchanges": ["kraken"],
+        "streamExchanges": STREAMED,
         "quoteRates": {"USDT": {"minSources": 2, "sources": [{"exchange": ex, "market": "USDT/USD"} for ex in ("kraken", "coinbaseexchange", "bitstamp")]}},
         "feeds": feeds,
     }
@@ -267,6 +281,27 @@ def main():
                 check(f"{symbol}: on chain within 1% of the latest served update", drift <= 100, f"{drift} bps")
         status, health = http("/healthz")
         check("the health endpoint reports every feed signed recently", status == 200 and health["healthy"], json.dumps(health)[:200] if status != 200 else "")
+        landed = [f.get("relayedAgeMs") for f in health["feeds"]]
+        check("and landed on chain recently", all(age is not None and age <= 3 * INTERVAL_MS for age in landed), str(landed))
+
+        m = metrics()
+        up = [ex for ex in STREAMED if m.get(f'oracle_stream_up{{exchange="{ex}"}}') == 1]
+        check("the venues' streams are up", len(up) >= len(STREAMED) - 1, f"{len(up)} of {len(STREAMED)}: down {sorted(set(STREAMED) - set(up))}")
+        by_transport = {t: sum(v for k, v in m.items() if k.startswith("oracle_source_quotes_total") and f'transport="{t}"' in k and 'result="ok"' in k) for t in ("stream", "rest")}
+        check("most quotes came from the streams", by_transport["stream"] > by_transport["rest"], str(by_transport))
+        print(f"  quotes taken: {by_transport['stream']:.0f} streamed, {by_transport['rest']:.0f} over REST")
+        waits, rounds = m["oracle_fetch_duration_seconds_sum"], m["oracle_fetch_duration_seconds_count"]
+        print(f"  a round waited {waits / rounds * 1000:.0f} ms for the venues on average ({rounds:.0f} rounds)")
+        check("the metrics count the relays, none failed", m.get('oracle_relays_total{result="ok"}', 0) >= 10 and 'oracle_relays_total{result="failed"}' not in m, str({k: v for k, v in m.items() if k.startswith("oracle_relays_total")}))
+        for symbol in SYMBOLS:
+            label = f'{{feed="{symbol}"}}'
+            signed_at, relayed_at = m.get(f"oracle_feed_last_signed_timestamp_seconds{label}", 0), m.get(f"oracle_feed_last_relayed_timestamp_seconds{label}", 0)
+            now_s = time.time()
+            check(f"{symbol}: the metrics say it was signed and landed within the last rounds", now_s - signed_at <= 10 and now_s - relayed_at <= 10, f"signed {now_s - signed_at:.1f} s ago, landed {now_s - relayed_at:.1f} s ago")
+            if symbol != "RYUSD/USD":
+                price_on_chain = feed(storages[symbol]["price_feed_storage_obj_id"], source_id)[0] / ONE
+                check(f"{symbol}: the price metric is the price on chain to within 1%", abs(m[f"oracle_feed_price{label}"] - price_on_chain) <= price_on_chain / 100, f'{m[f"oracle_feed_price{label}"]} vs {price_on_chain}')
+                check(f"{symbol}: it stands on at least six venues", m[f"oracle_feed_sources_used{label}"] >= 6, str(m[f"oracle_feed_sources_used{label}"]))
 
         btc_pfs = storages["BTC/USD"]["price_feed_storage_obj_id"]
         _, before_ms = feed(btc_pfs, source_id)
@@ -336,6 +371,12 @@ def main():
     rogue = start_service(config_path, UNREGISTERED_SEED, relayer_key, rogue_log)
     try:
         time.sleep(20)
+        # It signs every round, and nothing it signs lands: that is not a healthy service.
+        status, health = http("/healthz")
+        signing = all(f["ageMs"] is not None and f["ageMs"] <= 3 * INTERVAL_MS for f in health["feeds"])
+        check("it signs, and the health endpoint still fails because nothing lands", status == 503 and signing and not health["healthy"], json.dumps(health)[:300])
+        m = metrics()
+        check("its failed relays are counted", m.get('oracle_relays_total{result="failed"}', 0) >= 3 and 'oracle_relays_total{result="ok"}' not in m, str({k: v for k, v in m.items() if k.startswith("oracle_relays_total")}))
     finally:
         stop_service(rogue)
     log = rogue_log.read_text()

@@ -9,7 +9,7 @@ source's registered signers. The on-chain half (signature verification, signer s
 with the engine; this repository is the off-chain half.
 
 ```
-exchanges (public REST, via ccxt)
+exchanges (WebSocket streams, REST where a stream has nothing fresh; via ccxt)
         |  best bid and ask of every configured market, once per round
    price formation      leave out failed, stalled and outlying venues; convert USDT quotes;
         |               three-vote median; confidence from the vote quartiles
@@ -25,8 +25,10 @@ relayer (one transaction per round)   GET /v1/updates (for front ends to put in 
 
 Every `intervalMs` (3 s by default):
 
-1. **Fetch** the ticker of every configured market from every venue in parallel. A venue that
-   does not answer within `fetchTimeoutMs` is left out of the round.
+1. **Fetch** the best bid and ask of every configured market from every venue. For the venues
+   in `streamExchanges` the round takes what their WebSocket last delivered, if that is younger
+   than `streamMaxAgeMs`; every other market is asked for over REST in parallel, and a venue
+   that does not answer within `fetchTimeoutMs` is left out of the round.
 2. **Filter.** Left out: a failed request, an empty or crossed book, a ticker whose own timestamp
    is older than `maxExchangeLagMs`, and a venue further than `maxDeviationBps` from the weighted
    median of all venues.
@@ -58,6 +60,27 @@ needs the package admin (`force_update_price_feed`) with an update from `/v1/upd
 
 A feed with a `fixedPrice` (a collateral that is worth its quote by construction) is signed at
 that price every round, so that it stays within the markets' staleness tolerance.
+
+### Streams
+
+A round that asks nine venues over REST waits for the slowest of them, and signs quotes that
+are as old as their request took. A stream delivers each change of the best bid and ask as it
+happens, so the round has it already.
+
+A stream is trusted only for as long as it keeps talking. A quote older than `streamMaxAgeMs`
+(5 s by default) is not used, and the market is asked for over REST in that round instead. One
+rule covers a venue without a stream, a stream that is reconnecting, a subscription that died
+on a connection that did not, and a market so quiet that its book has not changed: the round
+gets a quote that was true a moment ago or none, never an old one. A streamed quote that is
+crossed is thrown away together with the one before it; when it comes from an order book the
+service keeps from increments, the stream is opened again to take a new snapshot. A stream that
+fails is reopened after 1 s, then 2 s, up to 30 s, and one that has said nothing for two
+minutes is reopened too.
+
+Each venue is followed over its best-bid-and-ask channel where it has one, else its ticker,
+else its order book. The venues in `config.example.json` were checked live; MEXC is left on
+REST: when checked, its best-bid-and-ask channel delivered nothing and its book stream arrived
+crossed, and ccxt needs an extra dependency (`protobufjs`) to read either.
 
 ## Running
 
@@ -93,8 +116,36 @@ an update is only worth its signature, and anyone may relay one.
   `oracle_haneul::price_feed_storage::update_price_feed(source, config, storage, price,
   confidence, timestamp_ms, public_key, signature, clock)`. Numbers are decimal strings, keys and
   signatures hex. A front end puts these calls in front of a trade.
-- `GET /healthz`: 200 while every feed was signed within the last three rounds, 503 otherwise,
-  with each feed's age, last price, venue count and the reason it was last skipped.
+- `GET /healthz`: 200 while every feed was signed within the last three rounds and, when the
+  service relays, an update of it landed on chain within them too; 503 otherwise. A service
+  that signs and cannot reach the chain keeps no market open, so it is not healthy. The body
+  has each feed's age, the age of its last update on chain, last price, venue count and the
+  reason it was last skipped.
+- `GET /metrics`: the metrics below, in the Prometheus text format.
+
+### Metrics and alerts
+
+| Metric | What it says |
+|---|---|
+| `oracle_feed_last_signed_timestamp_seconds{feed}` | When the feed was last signed. |
+| `oracle_feed_last_relayed_timestamp_seconds{feed}` | When an update of it last landed on chain. |
+| `oracle_feed_sources_used{feed}` | Venues the latest price stands on. |
+| `oracle_feed_price{feed}`, `oracle_feed_confidence_bps{feed}` | What was last signed. |
+| `oracle_feed_signed_total`, `oracle_feed_skipped_total{reason}`, `oracle_feed_clamped_total` | Rounds signed, not signed (`sources`, `confidence`, `price`) and signed at the step limit. |
+| `oracle_feed_source_rounds_total{feed,source,outcome}` | What became of each venue each round: `used`, or left out as `error`, `stale`, `crossed`, `no_rate` or `outlier`. |
+| `oracle_source_mid_price{feed,source}` | Each venue's mid price, converted, to set against the signed price. |
+| `oracle_source_quotes_total{exchange,market,transport,result}` | Quotes taken per round, over `stream` or `rest`. |
+| `oracle_source_quote_age_seconds{exchange,market}` | Age of the quote a source gave the latest round. |
+| `oracle_stream_up{exchange}`, `oracle_stream_errors_total{exchange}` | Whether a venue's stream is delivering, and how often it was reopened. |
+| `oracle_rounds_total`, `oracle_round_duration_seconds`, `oracle_fetch_duration_seconds` | Rounds, how long they take, and how long they wait for the venues. |
+| `oracle_relays_total{result}`, `oracle_relay_gas_total`, `oracle_relayer_balance_haneul` | Relay transactions, their gas and what the relayer has left. |
+
+`ops/prometheus-alerts.yml` holds alert rules over them. Two page: a feed not signed and a feed
+not landing for ten seconds, which is the markets' default tolerance. The rest warn of what
+leads there: too few venues, a venue left out of most rounds, a stream down, a wide confidence
+interval, a clamped price, failing relays and a low relayer balance.
+`ops/grafana-dashboard.json` is a dashboard of the same metrics. Scrape every five seconds or
+faster.
 
 ### Configuration
 
@@ -102,12 +153,13 @@ See `config.example.json`. Limits per feed and their defaults: `minSources` 3,
 `maxDeviationBps` 100, `maxConfidenceBps` 50, `maxStepBps` 100. The confidence bound should stay
 below the source's own (`oracle_haneul` refuses above 1% by default), and the interval well
 below the markets' oracle tolerance (10 s for the base asset by default). Venues listed in
-`batchExchanges` are asked for all their markets in one request per round.
+`batchExchanges` are asked for all their markets in one request per round, and those in
+`streamExchanges` are followed over a WebSocket (see Streams).
 
 ## Tests
 
 ```bash
-npm test             # 48 unit tests: fixed point, aggregation, message and signature, round, service loop
+npm test             # 71 unit tests: fixed point, aggregation, message and signature, round, service loop, streams, metrics
 npm run typecheck
 ```
 
@@ -119,8 +171,10 @@ publishes the perp engine's packages, sets up the source and a signer, creates f
 the prices the service signs without a relayer, pins the collateral feed, runs the service with
 a funded throwaway relayer, and checks the feeds on chain, the endpoints, a relay by a third
 party, the step limit (a signed price 30% away refused, forced by the package admin, the pinned
-feed refusing 1.01), and that a service whose signer is not registered changes nothing
-(32 checks).
+feed refusing 1.01), and that a service whose signer is not registered changes nothing. The
+service runs with its streams on, and the script checks that they are up and supply most
+quotes, that the metrics agree with the chain, and that the health endpoint fails for the
+service whose updates do not land (48 checks).
 
 `scripts/localnet_market_check.py` goes on to the engine: it creates a BTC/USD market on feeds
 the running service keeps fresh (one-minute feed TWAP) and checks that a maker and a taker trade

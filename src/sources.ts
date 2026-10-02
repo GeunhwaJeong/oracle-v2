@@ -9,6 +9,7 @@ import type { Exchange, Ticker as CcxtTicker } from "ccxt";
 import { sourceKey } from "./config.ts";
 import type { Config, SourceSpec } from "./config.ts";
 import { fromNumber } from "./fixed.ts";
+import { Metrics } from "./metrics.ts";
 import type { Fetched } from "./round.ts";
 
 export interface TickerSource {
@@ -16,21 +17,30 @@ export interface TickerSource {
   fetchAll(): Promise<Map<string, Fetched>>;
 }
 
+/** Something that can be asked for the tickers of some of the configured markets. */
+export interface TickerFetcher {
+  /** The markets named by `only` (as `exchange:market`), or every configured one. */
+  fetch(only?: ReadonlySet<string>): Promise<Map<string, Fetched>>;
+}
+
 const MARKETS_TIMEOUT_MS = 30_000;
 
-function allSources(config: Config): SourceSpec[] {
+export function allSources(config: Config): SourceSpec[] {
   return [
     ...config.feeds.flatMap((feed) => feed.sources),
     ...[...config.quoteRates.values()].flatMap((rate) => rate.sources),
   ];
 }
 
-function describe(error: unknown): string {
+export function describe(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return message.length > 160 ? `${message.slice(0, 160)}...` : message;
 }
 
-function toFetched(ticker: CcxtTicker | undefined): Fetched {
+/** The best bid and ask of a ticker, or of anything shaped like one. */
+export function toFetched(
+  ticker: { bid?: number | undefined; ask?: number | undefined; timestamp?: number | undefined } | undefined,
+): Fetched {
   if (ticker === undefined) return { error: "no ticker in the response" };
   const { bid, ask, timestamp } = ticker;
   if (typeof bid !== "number" || typeof ask !== "number") return { error: "no bid or ask" };
@@ -63,15 +73,17 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   });
 }
 
-export class CcxtSources implements TickerSource {
+export class CcxtSources implements TickerSource, TickerFetcher {
   readonly #timeoutMs: number;
   readonly #batch: Set<string>;
+  readonly #metrics: Metrics;
   /** exchange id to its client and the markets fetched from it. */
   readonly #venues = new Map<string, { client: Exchange; markets: string[] }>();
 
-  constructor(config: Config) {
+  constructor(config: Config, metrics: Metrics = new Metrics()) {
     this.#timeoutMs = config.fetchTimeoutMs;
     this.#batch = config.batchExchanges;
+    this.#metrics = metrics;
     for (const spec of allSources(config)) {
       let venue = this.#venues.get(spec.exchange);
       if (venue === undefined) {
@@ -116,30 +128,38 @@ export class CcxtSources implements TickerSource {
     return problems;
   }
 
-  async fetchAll(): Promise<Map<string, Fetched>> {
+  fetchAll(): Promise<Map<string, Fetched>> {
+    return this.fetch();
+  }
+
+  async fetch(only?: ReadonlySet<string>): Promise<Map<string, Fetched>> {
     const out = new Map<string, Fetched>();
+    const record = (exchange: string, market: string, fetched: Fetched) => {
+      out.set(sourceKey({ exchange, market }), fetched);
+      this.#metrics.quotes.inc({ exchange, market, transport: "rest", result: "error" in fetched ? "error" : "ok" });
+    };
     await Promise.all(
       [...this.#venues].map(async ([id, venue]) => {
+        const markets =
+          only === undefined
+            ? venue.markets
+            : venue.markets.filter((market) => only.has(sourceKey({ exchange: id, market })));
+        if (markets.length === 0) return;
         if (this.#batch.has(id)) {
           try {
-            const tickers = await withTimeout(venue.client.fetchTickers(venue.markets), this.#timeoutMs);
-            for (const market of venue.markets) {
-              out.set(sourceKey({ exchange: id, market }), toFetched(tickers[market]));
-            }
+            const tickers = await withTimeout(venue.client.fetchTickers(markets), this.#timeoutMs);
+            for (const market of markets) record(id, market, toFetched(tickers[market]));
           } catch (error) {
-            for (const market of venue.markets) {
-              out.set(sourceKey({ exchange: id, market }), { error: describe(error) });
-            }
+            for (const market of markets) record(id, market, { error: describe(error) });
           }
           return;
         }
         await Promise.all(
-          venue.markets.map(async (market) => {
-            const key = sourceKey({ exchange: id, market });
+          markets.map(async (market) => {
             try {
-              out.set(key, toFetched(await withTimeout(venue.client.fetchTicker(market), this.#timeoutMs)));
+              record(id, market, toFetched(await withTimeout(venue.client.fetchTicker(market), this.#timeoutMs)));
             } catch (error) {
-              out.set(key, { error: describe(error) });
+              record(id, market, { error: describe(error) });
             }
           }),
         );

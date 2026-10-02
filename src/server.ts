@@ -5,18 +5,31 @@
 // `oracle_haneul::price_feed_storage::update_price_feed` calls in front of the trade, so the
 // trade never depends on the relayer having landed its own update first. What is served is
 // public by design: an update is only worth its signature.
+//
+// Also serves the service's health and its metrics.
 
 import { createServer } from "node:http";
 import type { Server } from "node:http";
 
 import type { Config } from "./config.ts";
-import type { PriceService } from "./service.ts";
+import type { Metrics } from "./metrics.ts";
+import type { FeedStatus, PriceService } from "./service.ts";
 
 function hex(bytes: Uint8Array): string {
   return Buffer.from(bytes).toString("hex");
 }
 
-export function startServer(config: Config, service: PriceService): Server {
+/**
+ * Whether the feeds are being kept: every feed signed within the last few rounds and, when the
+ * service relays, landed on chain within them too. A service that signs but cannot reach the
+ * chain keeps no market open, so it is not healthy.
+ */
+export function isHealthy(feeds: FeedStatus[], intervalMs: number): boolean {
+  const recent = (ageMs: number | null | undefined) => ageMs !== null && ageMs !== undefined && ageMs <= 3 * intervalMs;
+  return feeds.every((feed) => recent(feed.ageMs) && (feed.relayedAgeMs === undefined || recent(feed.relayedAgeMs)));
+}
+
+export function startServer(config: Config, service: PriceService, metrics: Metrics): Server {
   const server = createServer((request, response) => {
     const send = (status: number, body: unknown) => {
       response.writeHead(status, {
@@ -48,9 +61,13 @@ export function startServer(config: Config, service: PriceService): Server {
     }
     if (path === "/healthz") {
       const feeds = service.status();
-      // Healthy while every feed was signed within the last few rounds.
-      const healthy = feeds.every((feed) => feed.ageMs !== null && feed.ageMs <= 3 * config.intervalMs);
+      const healthy = isHealthy(feeds, config.intervalMs);
       return send(healthy ? 200 : 503, { healthy, feeds });
+    }
+    if (path === "/metrics") {
+      response.writeHead(200, { "content-type": "text/plain; version=0.0.4; charset=utf-8", "cache-control": "no-store" });
+      response.end(metrics.exposition());
+      return;
     }
     return send(404, { error: "not found" });
   });

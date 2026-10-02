@@ -8,6 +8,8 @@
   "fetchTimeoutMs": 2000,
   "httpPort": 8787,
   "batchExchanges": ["kraken"],
+  "streamExchanges": ["binance", "okx", "bybit", "coinbaseexchange", "kraken", "kucoin", "gate", "bitstamp"],
+  "streamMaxAgeMs": 5000,
   "quoteRates": {
     "USDT": {
       "minSources": 2,

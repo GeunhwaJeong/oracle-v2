@@ -17,10 +17,12 @@
 import { Chain } from "./chain.ts";
 import { loadConfig } from "./config.ts";
 import { PriceSigner } from "./message.ts";
+import { Metrics } from "./metrics.ts";
 import { startServer } from "./server.ts";
 import { PriceService } from "./service.ts";
 import type { Logger } from "./service.ts";
 import { CcxtSources } from "./sources.ts";
+import { StreamSources, connectCcxt } from "./streams.ts";
 
 const log: Logger = {
   info: (message) => console.log(`${new Date().toISOString()} info  ${message}`),
@@ -47,16 +49,24 @@ async function main(): Promise<number> {
   delete process.env.ORACLE_SIGNER_SEED;
   delete process.env.RELAYER_KEY;
 
-  const sources = new CcxtSources(config);
-  for (const problem of await sources.init()) log.warn(problem);
+  const metrics = new Metrics();
+  const rest = new CcxtSources(config, metrics);
+  for (const problem of await rest.init()) log.warn(problem);
+  // A single round is over before a stream has connected; it is asked over REST.
+  const streams =
+    config.streamExchanges.size === 0 || once
+      ? null
+      : new StreamSources({ config, rest, connect: connectCcxt, metrics, log, now: Date.now });
+  streams?.start();
 
   const service = new PriceService({
     config,
-    sources,
+    sources: streams ?? rest,
     signer,
     chain: relayerKey === null ? null : chain,
     log,
     now: Date.now,
+    metrics,
   });
   if (signer !== null) {
     log.info(`price signer ${Buffer.from(signer.publicKey).toString("hex")}`);
@@ -73,8 +83,8 @@ async function main(): Promise<number> {
     return dryRun || signed.length === config.feeds.length ? 0 : 1;
   }
 
-  const server = config.httpPort === 0 ? null : startServer(config, service);
-  if (server !== null) log.info(`serving signed updates on ${config.httpHost}:${config.httpPort}`);
+  const server = config.httpPort === 0 ? null : startServer(config, service, metrics);
+  if (server !== null) log.info(`serving signed updates, health and metrics on ${config.httpHost}:${config.httpPort}`);
 
   let stopping = false;
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
@@ -94,6 +104,7 @@ async function main(): Promise<number> {
     if (rest > 0 && !stopping) await new Promise((resolve) => setTimeout(resolve, rest));
   }
   server?.close();
+  await streams?.close();
   return 0;
 }
 

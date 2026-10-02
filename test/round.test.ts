@@ -135,7 +135,7 @@ test("a venue away from the others is left out and does not move the price", () 
   const fetched = healthy();
   fetched.set("a:BTC/USD", ticker("109999", "110001"));
   const btc = formedOf(formPrices(config(), fetched, NOW), "BTC/USD");
-  assert.deepEqual(btc.dropped, [{ source: "a:BTC/USD", reason: "away from the other venues" }]);
+  assert.deepEqual(btc.dropped, [{ source: "a:BTC/USD", kind: "outlier", reason: "away from the other venues" }]);
   assert.equal(btc.price, 100_000n * ONE);
 });
 
@@ -162,7 +162,7 @@ test("venues split into two camps form no price when neither is large enough", (
 const LIMITS = { maxConfidenceBps: 50, maxStepBps: 100 };
 
 function formed(price: string, confidence = "1"): Formed {
-  return { price: parseFixed(price), confidence: parseFixed(confidence), used: [], dropped: [] };
+  return { price: parseFixed(price), confidence: parseFixed(confidence), used: [], dropped: [], mids: [] };
 }
 
 test("the first price is signed as formed", () => {
@@ -221,7 +221,7 @@ test("a confidence interval wider than the bound is not signed", () => {
   // 50 bps of 100,000 is 500.
   assert.equal(decide(formed("100000", "500"), null, LIMITS, NOW, 60_000).sign, true);
   const wide = decide(formed("100000", "500.000000000000000001"), null, LIMITS, NOW, 60_000);
-  assert.deepEqual(wide, { sign: false, reason: "confidence interval wider than the feed allows" });
+  assert.deepEqual(wide, { sign: false, kind: "confidence", reason: "confidence interval wider than the feed allows" });
 });
 
 test("a non-positive price is not signed", () => {

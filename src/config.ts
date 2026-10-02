@@ -77,6 +77,13 @@ export interface Config {
   quoteRates: Map<string, RateConfig>;
   /** Venues whose tickers are fetched in one request per round instead of one per market. */
   batchExchanges: Set<string>;
+  /**
+   * Venues whose best bid and ask are followed over a WebSocket. A round takes what the stream
+   * last delivered and asks over REST only for the markets whose stream has gone quiet.
+   */
+  streamExchanges: Set<string>;
+  /** A streamed quote older than this is not used; the market is asked for over REST instead. */
+  streamMaxAgeMs: number;
 }
 
 function fail(message: string): never {
@@ -194,6 +201,8 @@ export function parseConfig(json: unknown): Config {
 
   const batch = root.batchExchanges ?? [];
   if (!Array.isArray(batch)) fail("batchExchanges must be a list");
+  const stream = root.streamExchanges ?? [];
+  if (!Array.isArray(stream)) fail("streamExchanges must be a list");
 
   return {
     rpcUrl: string(root.rpcUrl, "rpcUrl"),
@@ -211,6 +220,8 @@ export function parseConfig(json: unknown): Config {
     feeds,
     quoteRates,
     batchExchanges: new Set(batch.map((id, i) => string(id, `batchExchanges[${i}]`))),
+    streamExchanges: new Set(stream.map((id, i) => string(id, `streamExchanges[${i}]`))),
+    streamMaxAgeMs: integer(root.streamMaxAgeMs, "streamMaxAgeMs", 5_000, 500, 60_000),
   };
 }
 

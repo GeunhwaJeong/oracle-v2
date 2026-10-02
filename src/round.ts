@@ -21,9 +21,19 @@ export interface Ticker {
 /** What a venue returned for a market this round: a ticker, or why there is none. */
 export type Fetched = { ticker: Ticker } | { error: string };
 
+/** Why a venue was left out of a round, as a class a metric can count. */
+export type DropKind = "error" | "crossed" | "stale" | "no_rate" | "outlier";
+
 export interface Dropped {
   source: string;
+  kind: DropKind;
   reason: string;
+}
+
+/** A venue's mid price in the feed's quote currency, whether it was used or found an outlier. */
+export interface SourceMid {
+  source: string;
+  mid: bigint;
 }
 
 export interface Formed {
@@ -31,9 +41,12 @@ export interface Formed {
   confidence: bigint;
   used: string[];
   dropped: Dropped[];
+  mids: SourceMid[];
 }
 
-export type Formation = ({ ok: true } & Formed) | { ok: false; reason: string; dropped: Dropped[] };
+export type Formation =
+  | ({ ok: true } & Formed)
+  | { ok: false; reason: string; dropped: Dropped[]; mids: SourceMid[] };
 
 interface Rate {
   price: bigint;
@@ -53,20 +66,20 @@ function quotesFrom(
     const source = sourceKey(spec);
     const result = fetched.get(source);
     if (result === undefined) {
-      dropped.push({ source, reason: "not fetched" });
+      dropped.push({ source, kind: "error", reason: "not fetched" });
       continue;
     }
     if ("error" in result) {
-      dropped.push({ source, reason: result.error });
+      dropped.push({ source, kind: "error", reason: result.error });
       continue;
     }
     const { bid, ask, exchangeTimestampMs } = result.ticker;
     if (bid <= 0n || ask < bid) {
-      dropped.push({ source, reason: "empty or crossed book" });
+      dropped.push({ source, kind: "crossed", reason: "empty or crossed book" });
       continue;
     }
     if (exchangeTimestampMs !== null && nowMs - exchangeTimestampMs > maxExchangeLagMs) {
-      dropped.push({ source, reason: `ticker is ${nowMs - exchangeTimestampMs} ms old` });
+      dropped.push({ source, kind: "stale", reason: `ticker is ${nowMs - exchangeTimestampMs} ms old` });
       continue;
     }
     const converted = convert(spec, {
@@ -76,7 +89,7 @@ function quotesFrom(
       weight: spec.weight,
     });
     if (typeof converted === "string") {
-      dropped.push({ source, reason: converted });
+      dropped.push({ source, kind: "no_rate", reason: converted });
       continue;
     }
     quotes.push(converted);
@@ -91,18 +104,20 @@ function form(
   maxDeviationBps: number,
 ): Formation {
   const { kept, outliers } = splitOutliers(quotes, maxDeviationBps);
-  const allDropped = [
+  const allDropped: Dropped[] = [
     ...dropped,
-    ...outliers.map((q) => ({ source: q.source, reason: "away from the other venues" })),
+    ...outliers.map((q) => ({ source: q.source, kind: "outlier" as const, reason: "away from the other venues" })),
   ];
+  const mids = quotes.map((q) => ({ source: q.source, mid: q.mid }));
   if (kept.length < minSources) {
     return {
       ok: false,
       reason: `${kept.length} usable venue(s), ${minSources} needed`,
       dropped: allDropped,
+      mids,
     };
   }
-  return { ok: true, ...aggregate(kept), used: kept.map((q) => q.source), dropped: allDropped };
+  return { ok: true, ...aggregate(kept), used: kept.map((q) => q.source), dropped: allDropped, mids };
 }
 
 /**
@@ -149,7 +164,7 @@ function formFeed(
   maxExchangeLagMs: number,
 ): Formation {
   if (feed.fixedPrice !== null) {
-    return { ok: true, price: feed.fixedPrice, confidence: 0n, used: ["fixed"], dropped: [] };
+    return { ok: true, price: feed.fixedPrice, confidence: 0n, used: ["fixed"], dropped: [], mids: [] };
   }
   const feedQuote = quoteOf(feed.symbol);
   const { quotes, dropped } = quotesFrom(feed.sources, fetched, nowMs, maxExchangeLagMs, (spec, quote) => {
@@ -175,7 +190,7 @@ export interface Previous {
 
 export type Decision =
   | { sign: true; price: bigint; confidence: bigint; clampedFrom: bigint | null }
-  | { sign: false; reason: string };
+  | { sign: false; kind: "price" | "confidence"; reason: string };
 
 /**
  * Decides what to sign for a formed price, given the price signed before it.
@@ -187,15 +202,15 @@ export type Decision =
  * price is older than `stepLimitResetMs`.
  */
 export function decide(
-  formed: Formed,
+  formed: Pick<Formed, "price" | "confidence">,
   previous: Previous | null,
   limits: { maxConfidenceBps: number; maxStepBps: number },
   nowMs: number,
   stepLimitResetMs: number,
 ): Decision {
-  if (formed.price <= 0n) return { sign: false, reason: "non-positive price" };
+  if (formed.price <= 0n) return { sign: false, kind: "price", reason: "non-positive price" };
   if (formed.confidence * BPS > formed.price * BigInt(limits.maxConfidenceBps)) {
-    return { sign: false, reason: "confidence interval wider than the feed allows" };
+    return { sign: false, kind: "confidence", reason: "confidence interval wider than the feed allows" };
   }
   if (previous === null || nowMs - previous.timestampMs > stepLimitResetMs) {
     return { sign: true, price: formed.price, confidence: formed.confidence, clampedFrom: null };

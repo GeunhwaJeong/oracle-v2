@@ -1,0 +1,117 @@
+# Alert rules for the Haneul oracle price service, for Prometheus.
+#
+# The markets stop trading on a feed older than their tolerance (10 s for the base asset by
+# default), so the two alerts on a feed's age are the ones that page. The rest say why a feed
+# is about to go stale, or that the service is running with less margin than it should.
+#
+# Scrape the service's /metrics every 5 s or faster: the thresholds below are in seconds.
+
+groups:
+  - name: haneul-oracle
+    rules:
+      - alert: OracleServiceDown
+        expr: up{job="haneul-oracle"} == 0
+        for: 15s
+        labels:
+          severity: page
+        annotations:
+          summary: The price service cannot be scraped
+          description: No metrics from {{ $labels.instance }}. If it is not signing, every market stops within its oracle tolerance.
+
+      - alert: OracleFeedNotSigned
+        expr: time() - oracle_feed_last_signed_timestamp_seconds > 10
+        for: 5s
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $labels.feed }} has not been signed for {{ $value | humanizeDuration }}"
+          description: The service forms no price it will sign. See oracle_feed_skipped_total for the reason and oracle_feed_source_rounds_total for the venues it is missing.
+
+      - alert: OracleFeedNotLanding
+        expr: time() - oracle_feed_last_relayed_timestamp_seconds > 10
+        for: 5s
+        labels:
+          severity: page
+        annotations:
+          summary: "No update of {{ $labels.feed }} has landed on chain for {{ $value | humanizeDuration }}"
+          description: Updates are signed and do not reach the chain. Check the node, the relayer's balance and oracle_relays_total{result="failed"}; a single feed refused points at its step limit.
+
+      - alert: OracleRoundsStalled
+        # A round every 3 s is 0.33 a second.
+        expr: rate(oracle_rounds_total[1m]) < 0.2
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: The price service is running fewer rounds than its interval
+          description: "{{ $value | humanize }} rounds a second. A round that takes longer than the interval is waiting on a venue or on the chain: see oracle_fetch_duration_seconds and oracle_round_duration_seconds."
+
+      - alert: OracleFeedSkipped
+        expr: increase(oracle_feed_skipped_total[5m]) > 0
+        labels:
+          severity: warn
+        annotations:
+          summary: "{{ $labels.feed }} was not signed in {{ $value | humanize }} round(s) ({{ $labels.reason }})"
+          description: "sources: too few venues agreed. confidence: the venues disagree by more than the feed's bound."
+
+      - alert: OracleFeedFewSources
+        # Feeds with a fixed price stand on one source by construction: leave them out.
+        expr: oracle_feed_sources_used{feed!~"RYUSD/.*"} < 6
+        for: 2m
+        labels:
+          severity: warn
+        annotations:
+          summary: "{{ $labels.feed }} stands on {{ $value }} venue(s)"
+          description: The feed is still signed while it has its minimum, but with little left to lose. oracle_feed_source_rounds_total says which venues are left out and why.
+
+      - alert: OracleSourceLeftOut
+        expr: |
+          sum by (feed, source) (rate(oracle_feed_source_rounds_total{outcome!="used"}[10m]))
+            / sum by (feed, source) (rate(oracle_feed_source_rounds_total[10m])) > 0.5
+        for: 10m
+        labels:
+          severity: warn
+        annotations:
+          summary: "{{ $labels.source }} is left out of {{ $labels.feed }} in most rounds"
+          description: The outcome label says why. error is the venue not answering, stale a venue whose ticker stopped moving, outlier a venue away from the others, no_rate a missing conversion rate.
+
+      - alert: OracleStreamDown
+        expr: oracle_stream_up == 0
+        for: 5m
+        labels:
+          severity: warn
+        annotations:
+          summary: "The stream of {{ $labels.exchange }} has been down for five minutes"
+          description: Its markets are asked for over REST meanwhile, which makes every round wait for the request.
+
+      - alert: OracleConfidenceWide
+        # Half of the default bound of 50 bps, past which nothing is signed.
+        expr: oracle_feed_confidence_bps > 25
+        for: 1m
+        labels:
+          severity: warn
+        annotations:
+          summary: "The venues disagree on {{ $labels.feed }} by {{ $value | humanize }} bps"
+
+      - alert: OraclePriceClamped
+        expr: increase(oracle_feed_clamped_total[5m]) > 0
+        labels:
+          severity: warn
+        annotations:
+          summary: "{{ $labels.feed }} moved faster than its step limit"
+          description: The signed price is following the venues at the limit. Either the market is moving that fast or most venues are wrong together.
+
+      - alert: OracleRelayFailing
+        expr: increase(oracle_relays_total{result="failed"}[5m]) > 3
+        labels:
+          severity: warn
+        annotations:
+          summary: "{{ $value | humanize }} relay transactions failed in five minutes"
+
+      - alert: OracleRelayerBalanceLow
+        # About three days of relaying four feeds every 3 s.
+        expr: oracle_relayer_balance_haneul < 100
+        labels:
+          severity: warn
+        annotations:
+          summary: "The relayer holds {{ $value | humanize }} HANEUL"
