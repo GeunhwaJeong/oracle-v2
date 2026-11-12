@@ -21,6 +21,10 @@ export interface Quote {
   halfSpread: bigint;
   /** Votes are repeated this many times; a positive integer. */
   weight: number;
+  /** How long ago the venue's stream delivered the quote; null when it was asked for just now. */
+  ageMs?: number | null;
+  /** How far the venue's own timestamp of the quote lies behind the round; null without one. */
+  exchangeLagMs?: number | null;
 }
 
 export interface Aggregate {

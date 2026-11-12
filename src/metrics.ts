@@ -147,6 +147,11 @@ export class Metrics {
   readonly lastSigned = new Gauge("oracle_feed_last_signed_timestamp_seconds", "When a feed was last signed");
   readonly lastRelayed = new Gauge("oracle_feed_last_relayed_timestamp_seconds", "When an update of a feed last landed on chain");
 
+  readonly eventLoopDelay = new Gauge(
+    "oracle_event_loop_delay_seconds",
+    "Longest the process was late to its own timers in the last minute: near zero while it keeps up, seconds while it falls behind the venues' streams",
+  );
+
   readonly relays = new Counter("oracle_relays_total", "Relay transactions, by result (ok or failed)");
   readonly relayGas = new Counter("oracle_relay_gas_total", "Gas spent relaying, in the smallest unit of HANEUL");
   readonly relayerBalance = new Gauge("oracle_relayer_balance_haneul", "Balance of the relayer when last checked");

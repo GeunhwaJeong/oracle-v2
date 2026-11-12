@@ -14,6 +14,8 @@
 // --dry-run forms and logs prices without signing or relaying, and needs neither key.
 // --once runs a single round; its exit code says whether every feed was signed.
 
+import { monitorEventLoopDelay } from "node:perf_hooks";
+
 import { Chain } from "./chain.ts";
 import { loadConfig } from "./config.ts";
 import { PriceSigner } from "./message.ts";
@@ -99,8 +101,20 @@ async function main(): Promise<number> {
     });
   }
   log.info(`${config.feeds.length} feed(s), one round every ${config.intervalMs} ms`);
+  // A process that is short of CPU or memory stays up and answers, but reads the venues'
+  // streams late, and a late quote looks like a fresh one. How late it is to its own timers
+  // is the one sign of that it can give. The gauge holds the worst of the last minute, so
+  // that something that looks once a minute does not miss a stall.
+  const lateness = monitorEventLoopDelay({ resolution: 20 });
+  lateness.enable();
+  const recent: number[] = [];
+  const perMinute = Math.max(1, Math.round(60_000 / config.intervalMs));
   while (!stopping) {
     const started = Date.now();
+    recent.push(lateness.max / 1e9);
+    lateness.reset();
+    if (recent.length > perMinute) recent.shift();
+    metrics.eventLoopDelay.set({}, Math.max(...recent));
     try {
       await service.round();
     } catch (error) {

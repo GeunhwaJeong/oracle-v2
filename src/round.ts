@@ -16,6 +16,8 @@ export interface Ticker {
   ask: bigint;
   /** The venue's own timestamp of the ticker, when it reports one. */
   exchangeTimestampMs: number | null;
+  /** How long ago a stream delivered the ticker. Absent when it was asked for over REST. */
+  receivedAgeMs?: number;
 }
 
 /** What a venue returned for a market this round: a ticker, or why there is none. */
@@ -34,6 +36,10 @@ export interface Dropped {
 export interface SourceMid {
   source: string;
   mid: bigint;
+  /** Half the venue's spread plus, for a converted quote, the uncertainty of the rate. */
+  halfSpread: bigint;
+  ageMs: number | null;
+  exchangeLagMs: number | null;
 }
 
 export interface Formed {
@@ -87,6 +93,8 @@ function quotesFrom(
       mid: (bid + ask) / 2n,
       halfSpread: (ask - bid) / 2n,
       weight: spec.weight,
+      ageMs: result.ticker.receivedAgeMs ?? null,
+      exchangeLagMs: exchangeTimestampMs === null ? null : nowMs - exchangeTimestampMs,
     });
     if (typeof converted === "string") {
       dropped.push({ source, kind: "no_rate", reason: converted });
@@ -108,7 +116,13 @@ function form(
     ...dropped,
     ...outliers.map((q) => ({ source: q.source, kind: "outlier" as const, reason: "away from the other venues" })),
   ];
-  const mids = quotes.map((q) => ({ source: q.source, mid: q.mid }));
+  const mids = quotes.map((q) => ({
+    source: q.source,
+    mid: q.mid,
+    halfSpread: q.halfSpread,
+    ageMs: q.ageMs ?? null,
+    exchangeLagMs: q.exchangeLagMs ?? null,
+  }));
   if (kept.length < minSources) {
     return {
       ok: false,
@@ -181,6 +195,31 @@ function formFeed(
     };
   });
   return form(quotes, dropped, feed.minSources, feed.maxDeviationBps);
+}
+
+/** A fixed-point ratio in basis points, to one decimal, for a log line. */
+function bps(part: bigint, whole: bigint): string {
+  if (whole === 0n) return "?";
+  const tenths = (part * BPS * 10n) / whole;
+  const sign = tenths < 0n ? "-" : "";
+  const abs = tenths < 0n ? -tenths : tenths;
+  return `${sign}${abs / 10n}.${abs % 10n}`;
+}
+
+/**
+ * What the venues said in a round whose price was not signed, for the log: how wide the
+ * confidence interval came out, and each venue's distance from the price, its own spread and
+ * how old its quote was. A venue that lags shows as far from the price with an old quote; venues
+ * that truly disagree show as far from it with fresh ones.
+ */
+export function describeVenues(formed: Pick<Formed, "price" | "confidence" | "mids">): string {
+  const seconds = (ms: number | null) => (ms === null ? "?" : `${(ms / 1000).toFixed(1)}s`);
+  const venues = formed.mids.map(
+    (m) =>
+      `${m.source} ${bps(m.mid - formed.price, formed.price)}bp` +
+      ` (spread ${bps(m.halfSpread, formed.price)}bp, held ${seconds(m.ageMs)}, venue time ${seconds(m.exchangeLagMs)})`,
+  );
+  return `confidence ${bps(formed.confidence, formed.price)}bp; ${venues.join(", ")}`;
 }
 
 export interface Previous {

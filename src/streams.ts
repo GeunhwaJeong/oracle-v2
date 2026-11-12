@@ -249,7 +249,14 @@ export class StreamSources implements TickerSource {
       const entry = this.#latest.get(key);
       const labels = { exchange: spec.exchange, market: spec.market };
       if (entry !== undefined && nowMs - entry.receivedMs <= config.streamMaxAgeMs) {
-        out.set(key, entry.fetched);
+        // The age goes with the quote, so that a round that cannot be signed can say how old
+        // each venue's quote was.
+        out.set(
+          key,
+          "error" in entry.fetched
+            ? entry.fetched
+            : { ticker: { ...entry.fetched.ticker, receivedAgeMs: nowMs - entry.receivedMs } },
+        );
         this.#metrics.quotes.inc({ ...labels, transport: "stream", result: "ok" });
         this.#metrics.quoteAgeSeconds.set(labels, (nowMs - entry.receivedMs) / 1000);
         continue;

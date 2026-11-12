@@ -10,7 +10,7 @@ import type { Config, FeedConfig } from "./config.ts";
 import { BPS, ONE, formatFixed } from "./fixed.ts";
 import type { PriceSigner } from "./message.ts";
 import { Metrics } from "./metrics.ts";
-import { decide, formPrices } from "./round.ts";
+import { decide, describeVenues, formPrices } from "./round.ts";
 import type { Previous } from "./round.ts";
 import type { TickerSource } from "./sources.ts";
 
@@ -147,7 +147,9 @@ export class PriceService {
       metrics.sourcesUsed.set(labels, formation.used.length);
       const decision = decide(formation, this.#previous.get(feed.symbol) ?? null, feed, nowMs, config.stepLimitResetMs);
       if (!decision.sign) {
-        this.#skip(feed, decision.kind, decision.reason);
+        // Why the venues could not be signed is only in their numbers, which are gone after
+        // the round.
+        this.#skip(feed, decision.kind, `${decision.reason} (${describeVenues(formation)})`);
         continue;
       }
       if (decision.clampedFrom !== null) {

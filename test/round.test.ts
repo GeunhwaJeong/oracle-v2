@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { parseConfig } from "../src/config.ts";
 import type { Config } from "../src/config.ts";
 import { ONE, parseFixed } from "../src/fixed.ts";
-import { decide, formPrices } from "../src/round.ts";
+import { decide, describeVenues, formPrices } from "../src/round.ts";
 import type { Fetched, Formed } from "../src/round.ts";
 
 const NOW = 1_800_000_000_000;
@@ -257,4 +257,21 @@ test("the configuration is validated", () => {
     mutate(c);
     assert.throws(() => parseConfig(c), message);
   }
+});
+
+test("a round that is not signed says what each venue gave", () => {
+  const price = parseFixed("100");
+  const text = describeVenues({
+    price,
+    confidence: parseFixed("0.62"),
+    mids: [
+      { source: "a:BTC/USD", mid: parseFixed("100.05"), halfSpread: parseFixed("0.01"), ageMs: 300, exchangeLagMs: null },
+      { source: "b:BTC/USD", mid: parseFixed("99.2"), halfSpread: parseFixed("0.02"), ageMs: null, exchangeLagMs: 41_250 },
+    ],
+  });
+  assert.equal(
+    text,
+    "confidence 62.0bp; a:BTC/USD 5.0bp (spread 1.0bp, held 0.3s, venue time ?), " +
+      "b:BTC/USD -80.0bp (spread 2.0bp, held ?, venue time 41.3s)",
+  );
 });
