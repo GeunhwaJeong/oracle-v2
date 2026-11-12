@@ -45,18 +45,23 @@ Every `intervalMs` (3 s by default):
    feed is not signed this round. The feed goes stale and the markets that read it stop, which is
    the intended outcome when the price is not known. A price further than `maxStepBps` from the
    previous signed price is signed at the limit, with the gap added to the confidence, so the feed
-   follows a real move over a few rounds but cannot be thrown by one bad round. The limit lapses
-   after `stepLimitResetMs` without a signed price.
+   follows a real move over a few rounds but cannot be thrown by one bad round. After
+   `stepLimitResetMs` without a signed price the next update may go as far as `maxLapsedStepBps`.
 6. **Sign** with a timestamp that only goes up, and **relay** all feeds in one transaction.
    If the chain refuses that transaction (one feed beyond its step limit fails all of it), each
    feed is relayed on its own, so the others do not go stale with it. A failed relay is logged;
-   the next round signs fresh prices.
+   the next round signs fresh prices, and for a feed whose update did not land it steps from the
+   price the chain holds.
 
 The source enforces a step limit of its own on chain (by default 0.5% at once plus 0.5% per
 second since the stored price, 20% at most, and whatever is set per feed). The service's
 `maxStepBps` of 1% per three-second round stays inside it, and because the chain's allowance
-grows with time a few missed relays do not lock a feed out. A gap beyond the chain's maximum
-needs the package admin (`force_update_price_feed`) with an update from `/v1/updates`.
+grows with time a few missed relays do not lock a feed out. Keep `maxStepBps` at or below 100
+for a three-second round: at 150 the service's steps compound as fast as the allowance grows.
+After a silence the first update goes `maxLapsedStepBps` at most (19% by default, inside the
+chain's 20%), so a gap beyond the chain's maximum is closed over several rounds without the
+package admin. `force_update_price_feed`, with an update from `/v1/updates`, remains for a feed
+whose own step limit on chain is set tighter than that.
 
 A feed with a `fixedPrice` (a collateral that is worth its quote by construction) is signed at
 that price every round, so that it stays within the markets' staleness tolerance.

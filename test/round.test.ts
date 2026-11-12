@@ -159,7 +159,7 @@ test("venues split into two camps form no price when neither is large enough", (
 
 // === decide ===
 
-const LIMITS = { maxConfidenceBps: 50, maxStepBps: 100 };
+const LIMITS = { maxConfidenceBps: 50, maxStepBps: 100, maxLapsedStepBps: 1_900 };
 
 function formed(price: string, confidence = "1"): Formed {
   return { price: parseFixed(price), confidence: parseFixed(confidence), used: [], dropped: [], mids: [] };
@@ -208,13 +208,23 @@ test("a feed follows a real move over consecutive updates", () => {
   assert.deepEqual(prices, [101_000n, 102_010n, 103_000n, 103_000n]);
 });
 
-test("the step limit lapses once the previous price is old", () => {
+test("once the previous price is old the next update may go as far as the lapsed limit", () => {
   const previous = { price: 100_000n * ONE, timestampMs: NOW - 60_001 };
-  const decision = decide(formed("120000"), previous, LIMITS, NOW, 60_000);
-  assert.deepEqual(decision, { sign: true, price: 120_000n * ONE, confidence: ONE, clampedFrom: null });
-  // At exactly the reset age it still applies.
-  const atEdge = decide(formed("120000"), { ...previous, timestampMs: NOW - 60_000 }, LIMITS, NOW, 60_000);
+  const within = decide(formed("115000"), previous, LIMITS, NOW, 60_000);
+  assert.deepEqual(within, { sign: true, price: 115_000n * ONE, confidence: ONE, clampedFrom: null });
+  // At exactly the reset age the round's own limit still applies.
+  const atEdge = decide(formed("115000"), { ...previous, timestampMs: NOW - 60_000 }, LIMITS, NOW, 60_000);
   assert.ok(atEdge.sign && atEdge.price === 101_000n * ONE);
+});
+
+test("a move beyond the lapsed limit is signed at it, never further than the chain takes at once", () => {
+  const previous = { price: 100_000n * ONE, timestampMs: NOW - 70_000 };
+  const down = decide(formed("75000"), previous, LIMITS, NOW, 60_000);
+  assert.ok(down.sign);
+  assert.equal(down.price, 81_000n * ONE);
+  assert.equal(down.clampedFrom, 75_000n * ONE);
+  const up = decide(formed("130000"), previous, LIMITS, NOW, 60_000);
+  assert.ok(up.sign && up.price === 119_000n * ONE);
 });
 
 test("a confidence interval wider than the bound is not signed", () => {

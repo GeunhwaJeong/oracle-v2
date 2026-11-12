@@ -65,6 +65,7 @@ export class PriceService {
   readonly #metrics: Metrics;
   #lastSignedMs = 0;
   #roundsSinceBalanceCheck = 0;
+  #sourceNumericId: number | null = null;
 
   constructor(deps: ServiceDeps) {
     this.#deps = deps;
@@ -81,6 +82,7 @@ export class PriceService {
     const { chain, config, log } = this.#deps;
     if (chain === null) return;
     const sourceNumericId = await chain.sourceNumericId();
+    this.#sourceNumericId = sourceNumericId;
     for (const feed of config.feeds) {
       const stored = await chain.storedPrice(feed.priceFeedStorageId, sourceNumericId);
       if (stored === null) {
@@ -155,8 +157,8 @@ export class PriceService {
       if (decision.clampedFrom !== null) {
         metrics.clamped.inc(labels);
         log.warn(
-          `${feed.symbol}: venues are at ${formatFixed(decision.clampedFrom)}, more than ${feed.maxStepBps} bps ` +
-            `from the previous price; signing ${formatFixed(decision.price)}`,
+          `${feed.symbol}: venues are at ${formatFixed(decision.clampedFrom)}, further from the previous price ` +
+            `than one update may go; signing ${formatFixed(decision.price)}`,
         );
       }
       this.#skipped.delete(feed.symbol);
@@ -171,11 +173,19 @@ export class PriceService {
     }
 
     if (signed.length > 0 && chain !== null) {
-      if (!(await this.#relay(chain, signed)) && signed.length > 1) {
-        // One update the chain refuses (a feed beyond its step limit, say) fails the whole
-        // transaction. The other feeds must not go stale with it, so each goes out on its own.
-        for (const update of signed) await this.#relay(chain, [update]);
+      let unlanded: SignedUpdate[] = [];
+      if (!(await this.#relay(chain, signed))) {
+        if (signed.length > 1) {
+          // One update the chain refuses (a feed beyond its step limit, say) fails the whole
+          // transaction. The other feeds must not go stale with it, so each goes out on its own.
+          for (const update of signed) {
+            if (!(await this.#relay(chain, [update]))) unlanded.push(update);
+          }
+        } else {
+          unlanded = signed;
+        }
       }
+      if (unlanded.length > 0) await this.#stepFromChain(chain, unlanded);
       await this.#checkBalance();
     }
     metrics.rounds.inc();
@@ -203,6 +213,29 @@ export class PriceService {
       // The signed updates stay available over HTTP; the next round signs fresh ones.
       log.error(`relay failed for ${what}: ${error instanceof Error ? error.message : String(error)}`);
       return false;
+    }
+  }
+
+  /**
+   * Makes the next round step from what the chain holds for the feeds whose update did not
+   * land. The chain measures a step from its own stored price: stepping on from a price it
+   * never took moves further from that one every round, and is refused every round.
+   */
+  async #stepFromChain(chain: Chain, updates: SignedUpdate[]): Promise<void> {
+    const { log } = this.#deps;
+    for (const update of updates) {
+      try {
+        this.#sourceNumericId ??= await chain.sourceNumericId();
+        const stored = await chain.storedPrice(update.priceFeedStorageId, this.#sourceNumericId);
+        if (stored === null) continue;
+        this.#previous.set(update.symbol, stored);
+        log.warn(
+          `${update.symbol}: ${formatFixed(update.price)} did not land; the next round steps from the chain's ` +
+            `${formatFixed(stored.price)} of ${new Date(stored.timestampMs).toISOString()}`,
+        );
+      } catch (error) {
+        log.warn(`${update.symbol}: the chain's price could not be read: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
   }
 

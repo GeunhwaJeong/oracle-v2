@@ -25,6 +25,12 @@ export interface FeedLimits {
   maxConfidenceBps: number;
   /** Furthest a signed price moves from the previous one, per update. */
   maxStepBps: number;
+  /**
+   * Furthest it moves in the one update that follows a silence longer than `stepLimitResetMs`.
+   * It has to stay inside the most the chain's own step limit ever allows, or the chain refuses
+   * that update and every one after it.
+   */
+  maxLapsedStepBps: number;
 }
 
 export interface FeedConfig extends FeedLimits {
@@ -62,9 +68,9 @@ export interface Config {
   /** A ticker whose own timestamp is older than this is treated as a stalled venue. */
   maxExchangeLagMs: number;
   /**
-   * After this long without a signed price the step limit no longer applies: the previous price
-   * says nothing about the market any more, and creeping toward it would publish a wrong price
-   * for longer than not publishing at all.
+   * After this long without a signed price the next update may move by `maxLapsedStepBps`
+   * instead of `maxStepBps`: the previous price says little about the market any more, and
+   * creeping away from it would publish a wrong price for longer.
    */
   stepLimitResetMs: number;
   /** Port of the HTTP endpoint that serves the latest signed updates; 0 turns it off. */
@@ -186,6 +192,9 @@ export function parseConfig(json: unknown): Config {
     if (fixed === null && minSources > feedSources.length) {
       fail(`${where}.minSources exceeds its number of sources`);
     }
+    const maxStepBps = integer(raw.maxStepBps, `${where}.maxStepBps`, 100, 1, 10_000);
+    const maxLapsedStepBps = integer(raw.maxLapsedStepBps, `${where}.maxLapsedStepBps`, Math.max(1_900, maxStepBps), 1, 10_000);
+    if (maxLapsedStepBps < maxStepBps) fail(`${where}.maxLapsedStepBps is below its maxStepBps`);
     return {
       symbol,
       storageId,
@@ -195,7 +204,8 @@ export function parseConfig(json: unknown): Config {
       minSources,
       maxDeviationBps: integer(raw.maxDeviationBps, `${where}.maxDeviationBps`, 100, 1, 10_000),
       maxConfidenceBps: integer(raw.maxConfidenceBps, `${where}.maxConfidenceBps`, 50, 0, 10_000),
-      maxStepBps: integer(raw.maxStepBps, `${where}.maxStepBps`, 100, 1, 10_000),
+      maxStepBps,
+      maxLapsedStepBps,
     };
   });
 

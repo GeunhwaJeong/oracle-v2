@@ -184,6 +184,47 @@ test("a feed the chain refuses does not hold the other feeds back", async () => 
   assert.ok(logs.some((line) => /info relayed RYUSD\/USD=1 /.test(line)));
 });
 
+test("after a refused update the next round steps from the price the chain holds", async () => {
+  const options: { stored: StoredPrice; refused?: string } = {
+    stored: { price: 100_000n * ONE, timestampMs: 1_800_000_000_000 - 3_000 },
+    refused: "BTC/USD",
+  };
+  const { service, relayed, logs, state } = setup(options);
+  await service.loadStoredPrices();
+  state.mid = 110_000;
+  await service.round();
+  assert.ok(logs.some((line) => /warn BTC\/USD: 101000 did not land; the next round steps from the chain's 100000 /.test(line)));
+  options.refused = undefined;
+  state.now += 3_000;
+  await service.round();
+  // One step from the chain's 100,000 again, not a second one from the 101,000 it never took.
+  const landed = relayed.at(-1)!.find((update) => update.symbol === "BTC/USD")!;
+  assert.equal(landed.price, 101_000n * ONE);
+});
+
+test("a move during a long silence is closed over several rounds, each one the chain can take", async () => {
+  const { service, relayed, state } = setup({ stored: { price: 100_000n * ONE, timestampMs: 1_800_000_000_000 - 70_000 } });
+  await service.loadStoredPrices();
+  state.mid = 75_000;
+  const prices: bigint[] = [];
+  for (let i = 0; i < 3; i++) {
+    await service.round();
+    prices.push(relayed.at(-1)!.find((update) => update.symbol === "BTC/USD")!.price);
+    state.now += 3_000;
+  }
+  // 19% at once, then a round's 1% at a time.
+  assert.deepEqual(prices, [81_000n * ONE, 80_190n * ONE, 793_881n * ONE / 10n]);
+});
+
+test("a relay that fails without the chain being readable keeps the service's own last price", async () => {
+  const { service, metrics, state } = setup({ relayFails: true });
+  await service.round();
+  state.mid = 105_000;
+  state.now += 3_000;
+  await service.round();
+  assert.equal(metrics.price.get({ feed: "BTC/USD" }), 101_000);
+});
+
 test("status reports the age of each feed's last signed update", async () => {
   const { service, state } = setup();
   await service.round();

@@ -237,13 +237,15 @@ export type Decision =
  * A confidence interval wider than the feed's bound is not signed at all: the venues disagree,
  * and a stale feed stops the markets, which is the safe outcome. A price further than the step
  * limit from the previous one is signed at the limit, so the feed follows a real move over a
- * few updates but cannot be thrown by a single bad round. The limit lapses once the previous
- * price is older than `stepLimitResetMs`.
+ * few updates but cannot be thrown by a single bad round. Once the previous price is older than
+ * `stepLimitResetMs` the one update that follows may go as far as `maxLapsedStepBps`: further
+ * than a round's step, since the market has moved on, but never further than the chain accepts
+ * in a single update, since a price the chain refuses keeps the feed stale for good.
  */
 export function decide(
   formed: Pick<Formed, "price" | "confidence">,
   previous: Previous | null,
-  limits: { maxConfidenceBps: number; maxStepBps: number },
+  limits: { maxConfidenceBps: number; maxStepBps: number; maxLapsedStepBps: number },
   nowMs: number,
   stepLimitResetMs: number,
 ): Decision {
@@ -251,10 +253,11 @@ export function decide(
   if (formed.confidence * BPS > formed.price * BigInt(limits.maxConfidenceBps)) {
     return { sign: false, kind: "confidence", reason: "confidence interval wider than the feed allows" };
   }
-  if (previous === null || nowMs - previous.timestampMs > stepLimitResetMs) {
+  if (previous === null) {
     return { sign: true, price: formed.price, confidence: formed.confidence, clampedFrom: null };
   }
-  const price = clampStep(formed.price, previous.price, limits.maxStepBps);
+  const lapsed = nowMs - previous.timestampMs > stepLimitResetMs;
+  const price = clampStep(formed.price, previous.price, lapsed ? limits.maxLapsedStepBps : limits.maxStepBps);
   if (price === formed.price) {
     return { sign: true, price, confidence: formed.confidence, clampedFrom: null };
   }
