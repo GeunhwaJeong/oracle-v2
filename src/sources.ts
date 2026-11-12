@@ -24,6 +24,11 @@ export interface TickerFetcher {
 }
 
 const MARKETS_TIMEOUT_MS = 30_000;
+/**
+ * How long startup waits for the market lists. No price is signed while it waits, so a venue
+ * that is slow to answer must not hold the others back.
+ */
+const STARTUP_WAIT_MS = 5_000;
 
 export function allSources(config: Config): SourceSpec[] {
   return [
@@ -55,6 +60,67 @@ export function toFetched(
   } catch (error) {
     return { error: describe(error) };
   }
+}
+
+/** A venue whose market list is loaded at startup. */
+export interface MarketLoader {
+  id: string;
+  /** The configured markets, which the venue has to list. */
+  markets: string[];
+  /** Resolves to the venue's markets by symbol. */
+  load(): Promise<Record<string, unknown>>;
+}
+
+/** How the loading of a venue that was not waited for ended. */
+export type LateOutcome = { id: string; ok: true } | { id: string; ok: false; fatal: boolean; reason: string };
+
+function missingMarket(loader: MarketLoader, listed: Record<string, unknown>): string | null {
+  for (const market of loader.markets) {
+    if (!(market in listed)) return `${loader.id} has no market "${market}"`;
+  }
+  return null;
+}
+
+/**
+ * Loads the venues' market lists side by side and waits for them at most `waitMs`.
+ *
+ * Returns the problems that are not fatal: the venues that failed to load and those still
+ * loading. Throws when a venue that answered in time does not list a configured market, which
+ * is a mistake in the configuration. A venue that answers later is checked the same way and
+ * reported through `onLate`; by then prices are being signed, so nothing is thrown.
+ */
+export async function loadMarketsWithin(
+  loaders: MarketLoader[],
+  waitMs: number,
+  onLate: (outcome: LateOutcome) => void,
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms).unref()),
+): Promise<string[]> {
+  type Outcome = { missing: string | null } | { error: string };
+  const deadline = sleep(waitMs).then(() => null);
+  const problems: string[] = [];
+  let fatal: string | null = null;
+  await Promise.all(
+    loaders.map(async (loader) => {
+      const loading: Promise<Outcome> = loader.load().then(
+        (listed) => ({ missing: missingMarket(loader, listed) }),
+        (error: unknown) => ({ error: describe(error) }),
+      );
+      const outcome = await Promise.race([loading, deadline]);
+      if (outcome === null) {
+        problems.push(`${loader.id}: markets still loading after ${waitMs} ms, starting without them`);
+        void loading.then((late) => {
+          if ("error" in late) onLate({ id: loader.id, ok: false, fatal: false, reason: `markets not loaded (${late.error})` });
+          else if (late.missing !== null) onLate({ id: loader.id, ok: false, fatal: true, reason: late.missing });
+          else onLate({ id: loader.id, ok: true });
+        });
+        return;
+      }
+      if ("error" in outcome) problems.push(`${loader.id}: markets not loaded (${outcome.error})`);
+      else if (outcome.missing !== null) fatal ??= outcome.missing;
+    }),
+  );
+  if (fatal !== null) throw new Error(fatal);
+  return problems;
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
@@ -100,32 +166,31 @@ export class CcxtSources implements TickerSource, TickerFetcher {
   }
 
   /**
-   * Loads every venue's market list and checks that the configured markets exist. A venue that
-   * cannot be reached is reported and retried on its first round, not treated as fatal: the
-   * service has to start while one venue is down.
+   * Loads every venue's market list and checks that the configured markets exist, for at most
+   * `waitMs`. A venue that cannot be reached, or has not answered by then, is reported and not
+   * treated as fatal: the service has to start, and to start soon, while one venue is down or
+   * slow. Such a venue is left out of the rounds until its markets are there, and `onLate` is
+   * told how its loading ended.
    */
-  async init(): Promise<string[]> {
-    const problems: string[] = [];
-    await Promise.all(
-      [...this.#venues].map(async ([id, venue]) => {
-        // A market list is many times larger than a ticker and is loaded once.
-        venue.client.timeout = MARKETS_TIMEOUT_MS;
-        try {
-          await withTimeout(venue.client.loadMarkets(), MARKETS_TIMEOUT_MS);
-        } catch (error) {
-          problems.push(`${id}: markets not loaded (${describe(error)})`);
-          return;
-        } finally {
-          venue.client.timeout = this.#timeoutMs;
-        }
-        for (const market of venue.markets) {
-          if (!(market in (venue.client.markets ?? {}))) {
-            throw new Error(`${id} has no market "${market}"`);
+  init(onLate: (outcome: LateOutcome) => void = () => {}, waitMs: number = STARTUP_WAIT_MS): Promise<string[]> {
+    return loadMarketsWithin(
+      [...this.#venues].map(([id, venue]) => ({
+        id,
+        markets: venue.markets,
+        load: async () => {
+          // A market list is many times larger than a ticker and is loaded once.
+          venue.client.timeout = MARKETS_TIMEOUT_MS;
+          try {
+            await withTimeout(venue.client.loadMarkets(), MARKETS_TIMEOUT_MS);
+          } finally {
+            venue.client.timeout = this.#timeoutMs;
           }
-        }
-      }),
+          return venue.client.markets ?? {};
+        },
+      })),
+      waitMs,
+      onLate,
     );
-    return problems;
   }
 
   fetchAll(): Promise<Map<string, Fetched>> {

@@ -51,7 +51,13 @@ async function main(): Promise<number> {
 
   const metrics = new Metrics();
   const rest = new CcxtSources(config, metrics);
-  for (const problem of await rest.init()) log.warn(problem);
+  const problems = await rest.init((late) => {
+    if (late.ok) log.info(`${late.id}: markets loaded`);
+    // Prices are being signed by now: a market missing from a venue is said, not died of.
+    else if (late.fatal) log.error(`${late.id}: ${late.reason}; the venue stays out of the rounds`);
+    else log.warn(`${late.id}: ${late.reason}`);
+  });
+  for (const problem of problems) log.warn(problem);
   // A single round is over before a stream has connected; it is asked over REST.
   const streams =
     config.streamExchanges.size === 0 || once
