@@ -16,7 +16,7 @@ import { sourceKey } from "./config.ts";
 import type { Config } from "./config.ts";
 import { Metrics } from "./metrics.ts";
 import type { Fetched } from "./round.ts";
-import { allSources, describe, toFetched } from "./sources.ts";
+import { SPOT_MARKETS_ONLY, allSources, describe, toFetched } from "./sources.ts";
 import type { TickerFetcher, TickerSource } from "./sources.ts";
 
 interface TickerLike {
@@ -281,5 +281,5 @@ export function connectCcxt(exchange: string): StreamClient {
   const constructor = pro[exchange];
   if (typeof constructor !== "function") throw new Error(`"${exchange}" has no stream client`);
   // The streams pace themselves; ccxt's limiter would only delay the subscriptions.
-  return new constructor({ enableRateLimit: false });
+  return new constructor({ enableRateLimit: false, options: SPOT_MARKETS_ONLY });
 }

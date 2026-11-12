@@ -23,6 +23,14 @@ export interface TickerFetcher {
   fetch(only?: ReadonlySet<string>): Promise<Map<string, Fetched>>;
 }
 
+/**
+ * Prices are formed from spot markets only. Left to itself a venue's client also loads the
+ * venue's swaps, futures and options: thousands of markets that are never asked for, most of a
+ * client's memory, and on some venues most of the time its market list takes to load. A venue
+ * without the option ignores it.
+ */
+export const SPOT_MARKETS_ONLY = { fetchMarkets: { types: ["spot"] } };
+
 const MARKETS_TIMEOUT_MS = 30_000;
 /**
  * How long startup waits for the market lists. No price is signed while it waits, so a venue
@@ -158,7 +166,10 @@ export class CcxtSources implements TickerSource, TickerFetcher {
           throw new Error(`unknown exchange "${spec.exchange}"`);
         }
         // The service paces itself: one round of requests per interval.
-        venue = { client: new constructor({ timeout: config.fetchTimeoutMs, enableRateLimit: false }), markets: [] };
+        venue = {
+          client: new constructor({ timeout: config.fetchTimeoutMs, enableRateLimit: false, options: SPOT_MARKETS_ONLY }),
+          markets: [],
+        };
         this.#venues.set(spec.exchange, venue);
       }
       if (!venue.markets.includes(spec.market)) venue.markets.push(spec.market);
