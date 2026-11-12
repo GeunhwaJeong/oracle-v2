@@ -32,6 +32,8 @@ const log: Logger = {
   error: (message) => console.error(`${new Date().toISOString()} error ${message}`),
 };
 
+const SHUTDOWN_WAIT_MS = 1_000;
+
 function argument(name: string): string | null {
   const index = process.argv.indexOf(name);
   return index === -1 ? null : (process.argv[index + 1] ?? null);
@@ -95,9 +97,12 @@ async function main(): Promise<number> {
   if (server !== null) log.info(`serving signed updates, health and metrics on ${config.httpHost}:${config.httpPort}`);
 
   let stopping = false;
+  let wake: () => void = () => {};
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.on(signal, () => {
       stopping = true;
+      // Not to sit out the rest of the interval: no price is signed from here on.
+      wake();
     });
   }
   log.info(`${config.feeds.length} feed(s), one round every ${config.intervalMs} ms`);
@@ -121,10 +126,24 @@ async function main(): Promise<number> {
       log.error(`round failed: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`);
     }
     const rest = config.intervalMs - (Date.now() - started);
-    if (rest > 0 && !stopping) await new Promise((resolve) => setTimeout(resolve, rest));
+    if (rest > 0 && !stopping) {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, rest);
+        wake = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+      });
+    }
   }
   server?.close();
-  await streams?.close();
+  // Closing the streams politely is worth a moment and no more. A venue in the middle of a
+  // reconnect has been seen to hold it for half a minute, and until this process is gone the
+  // next one does not start and no price is signed.
+  await Promise.race([
+    streams?.close(),
+    new Promise((resolve) => setTimeout(resolve, SHUTDOWN_WAIT_MS).unref()),
+  ]);
   return 0;
 }
 
